@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>自检 · TimeScribe</title>
+<script src="harness.js"></script>
+<script src="root.browser.js"></script>
+<script>
+  window.__TT_PAGE_ERRORS__ = [];
+  window.addEventListener('error', function (e) {
+    window.__TT_PAGE_ERRORS__.push(String(e.message || e.error || 'unknown error'));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    window.__TT_PAGE_ERRORS__.push('unhandledrejection: ' + String(e.reason));
+  });
+</script>
+<!-- 与 tests/manifest.json 的 browserGlobals 保持一致（由 p1-data.test.js 校验） -->
+<script src="../js/util.js"></script>
+<script src="../js/calc.js"></script>
+<script src="../js/storage.js"></script>
+<script src="../js/projects.js"></script>
+<script src="../js/store.js"></script>
+<script src="../js/timer.js"></script>
+<script src="../js/ui/toast.js"></script>
+<script src="../js/ui/modal.js"></script>
+<script src="../js/ui/form.js"></script>
+<script src="../js/ui/home.js"></script>
+<script src="../js/ui/projectActions.js"></script>
+<script src="../js/ui/records.js"></script>
+<script src="../js/ui/settings.js"></script>
+<script src="../js/ui/data.js"></script>
+</head>
+<body>
+<pre id="selftest-result">RUNNING</pre>
+<!--
+  与 app 里同名的宿主容器：弹窗/提示条模块挂在 document 上。
+  弹窗正常情况下应该渲染在 app 自己的文档里（那里有真实的项目数据）；
+  这里的容器只是兜底，避免"测试页缺少宿主"导致异常。
+-->
+<div id="modal-host" hidden></div>
+<div id="toast-host"></div>
+<iframe id="app-frame" title="app under test" style="width:1200px;height:900px;border:1px solid #ccc"></iframe>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const phase = (params.get('p') || 'ALL').toUpperCase();
+  const fmt = params.get('fmt') || 'text';
+  const loadApp = params.get('app') !== '0';
+  const report = params.get('report') === '1';
+
+  const host = document.getElementById('selftest-result');
+  const frame = document.getElementById('app-frame');
+
+  function waitForFrameLoad(timeoutMs) {
+    return new Promise(function (resolve) {
+      let done = false;
+      const finish = function (ok) { if (!done) { done = true; resolve(ok); } };
+      frame.addEventListener('load', function () { finish(true); });
+      setTimeout(function () { finish(false); }, timeoutMs);
+    });
+  }
+
+  function waitForAppReady(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise(function (resolve) {
+      (function poll() {
+        let ready = false;
+        try {
+          const doc = frame.contentDocument;
+          ready = !!(doc && doc.getElementById('app') && frame.contentWindow.__TIMESCRIBE_BOOT__);
+        } catch (e) { ready = false; }
+        if (ready) return resolve(true);
+        if (Date.now() > deadline) return resolve(false);
+        setTimeout(poll, 50);
+      })();
+    });
+  }
+
+  async function main() {
+    if (loadApp) {
+      frame.src = '../index.html?selftest=' + Date.now();
+      const loaded = await waitForFrameLoad(10000);
+      if (!loaded) { host.textContent = 'FRAME_ERROR 未能加载被测 app 页面'; return; }
+      const ready = await waitForAppReady(8000);
+      if (!ready) { host.textContent = 'FRAME_ERROR app 页面已加载但未完成初始化'; return; }
+    } else {
+      frame.remove();
+    }
+
+    window.__TT_APP__ = loadApp ? frame.contentWindow : null;
+    window.__TT_APP_DOC__ = loadApp ? frame.contentDocument : null;
+
+    try {
+      const mod = await import('./browser-tests.js');
+      if (!mod.fileList || mod.fileList.length === 0) {
+        host.textContent = 'NO_TESTS 阶段 ' + phase + ' 没有浏览器测试文件';
+        return;
+      }
+    } catch (err) {
+      host.textContent = 'IMPORT_ERROR :: ' + (err && err.message ? err.message : String(err));
+      return;
+    }
+
+    const results = await window.TTTest.run(phase);
+    const summary = window.TTTest.summarize(results);
+    const payload = { phase: phase, summary: summary, results: results };
+
+    if (fmt === 'json') {
+      host.setAttribute('data-json', '1');
+      host.textContent = JSON.stringify(payload);
+    } else {
+      const lines = [];
+      for (const r of results) {
+        lines.push((r.passed ? 'PASS' : 'FAIL') + '  [' + r.phase + '] ' + r.suite + ' :: ' + r.test + (r.passed ? '' : '  →  ' + r.message));
+      }
+      lines.push('');
+      lines.push('总计 ' + summary.total + ' 项，通过 ' + summary.passed + '，失败 ' + summary.failed);
+      host.textContent = lines.join('\n');
+    }
+
+    // 自动化运行器用 POST 回传结果，避免依赖 --virtual-time-budget 去"等页面跑完"
+    if (report) {
+      try {
+        await fetch('/__result', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(payload)
+        });
+      } catch (err) {
+        host.textContent = 'REPORT_ERROR :: ' + (err && err.message ? err.message : String(err));
+      }
+    }
+  }
+
+  main().catch(function (err) {
+    host.textContent = 'RUNNER_ERROR :: ' + (err && err.message ? err.message : String(err));
+  });
+</script>
+</body>
+</html>

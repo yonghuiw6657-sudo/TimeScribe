@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TimeScribe</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app" data-app="timescribe">
+    <header class="appbar">
+      <div class="logo"><i class="dot-logo"></i>TimeScribe</div>
+      <div class="actions">
+        <button type="button" class="btn primary" id="btn-new-project">＋ 新建项目</button>
+        <button type="button" class="btn" id="btn-export">导出</button>
+        <button type="button" class="btn" id="btn-import">导入</button>
+        <button type="button" class="btn ghost" id="btn-settings">设置</button>
+      </div>
+    </header>
+    <main class="columns">
+      <section class="col-left">
+        <div class="panel" id="stat-total">
+          <h3>累计总投入</h3>
+          <div class="bignum">0 <small>分</small></div>
+        </div>
+        <div class="panel" id="chart-panel">
+          <h3>投入分布</h3>
+          <div class="chart-wrap" id="chart-host"></div>
+        </div>
+      </section>
+      <section class="col-right">
+        <div class="list-head">
+          <h3 id="list-title">我的项目</h3>
+          <div id="sort-host"></div>
+        </div>
+        <div id="project-list"></div>
+      </section>
+    </main>
+    <div id="toast-host" class="toast-host"></div>
+    <div id="modal-host" class="modal-host" hidden></div>
+  </div>
+  <p id="boot-status" class="boot-status">正在启动…</p>
+
+  <!-- 全局模块：加载顺序即依赖顺序，且必须与 tests/manifest.json 的 browserGlobals 一致 -->
+  <script src="js/util.js"></script>
+  <script src="js/calc.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/projects.js"></script>
+  <script src="js/store.js"></script>
+  <script src="js/timer.js"></script>
+  <script src="js/ui/toast.js"></script>
+  <script src="js/ui/modal.js"></script>
+  <script src="js/ui/form.js"></script>
+  <script src="js/ui/home.js"></script>
+  <script src="js/ui/projectActions.js"></script>
+  <script src="js/ui/records.js"></script>
+  <script src="js/ui/settings.js"></script>
+  <script src="js/ui/data.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

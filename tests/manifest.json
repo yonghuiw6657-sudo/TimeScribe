@@ -1,0 +1,89 @@
+{
+  "browserGlobals": [
+    "js/util.js",
+    "js/calc.js",
+    "js/storage.js",
+    "js/projects.js",
+    "js/store.js",
+    "js/timer.js",
+    "js/ui/toast.js",
+    "js/ui/modal.js",
+    "js/ui/form.js",
+    "js/ui/home.js",
+    "js/ui/projectActions.js",
+    "js/ui/records.js",
+    "js/ui/settings.js",
+    "js/ui/data.js"
+  ],
+  "phases": {
+    "P0": {
+      "node": [
+        "p0-static.test.js",
+        "p0-encoding.test.js"
+      ],
+      "browser": [
+        "p0-boot.browser.test.js"
+      ],
+      "scripts": [
+        "p0-launch.mjs"
+      ]
+    },
+    "P1": {
+      "node": [
+        "p1-data.test.js"
+      ],
+      "browser": [
+        "p1-store.browser.test.js"
+      ]
+    },
+    "P2": {
+      "node": [
+        "p2-format.test.js",
+        "p2-summary.test.js"
+      ]
+    },
+    "P3": {
+      "node": [
+        "p3-projects.test.js"
+      ],
+      "browser": [
+        "p3-project-ui.browser.test.js"
+      ]
+    },
+    "P4": {
+      "browser": [
+        "p4-timer.browser.test.js"
+      ]
+    },
+    "P5": {
+      "browser": [
+        "p5-stats.browser.test.js"
+      ]
+    },
+    "P6": {
+      "browser": [
+        "p6-threshold.browser.test.js"
+      ]
+    },
+    "P7": {
+      "browser": [
+        "p7-records.browser.test.js"
+      ]
+    },
+    "P8": {
+      "browser": [
+        "p8-settings.browser.test.js"
+      ]
+    },
+    "P9": {
+      "browser": [
+        "p9-data.browser.test.js"
+      ]
+    },
+    "P10": {
+      "browser": [
+        "p10-ui.browser.test.js"
+      ]
+    }
+  }
+}
