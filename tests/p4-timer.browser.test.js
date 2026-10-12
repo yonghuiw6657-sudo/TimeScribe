@@ -5,9 +5,14 @@
  * 这里全部通过**真实点击界面按钮**来驱动，而不是直接调函数，
  * 这样按钮绑定错了也能被测出来。
  *
- * 两条容易搞混的生命周期规则（曾经写错过，见测试里的注释）：
+ * 三条容易搞混的生命周期规则（都曾经写错过，见测试里的注释）：
  *   · 切走浏览器（切标签、切应用、最小化）→ 计时**照常在后台走**，绝不暂停
- *   · 关闭页面 / 关闭浏览器 / 关掉应用 → **这一段直接结束**：够阈值就存成记录，不够就丢弃
+ *   · 刷新页面 → **这一段不结束**，刷新后接着计时（第六轮按用户反馈改的）
+ *   · 关闭页面 / 关闭浏览器 / 关掉应用 → **这一段结束**：够阈值就存成记录，不够就丢弃
+ *
+ * 注意"刷新"和"重新打开"在测试里必须是两种不同的动作：
+ *   · `hardReloadApp()` 调 location.reload()，浏览器算"刷新"，应用才会接着计时
+ *   · `reloadApp()` 换一个网址重新加载，浏览器算"导航"，等同于关掉再打开
  */
 import {
   T, q, qa, m, resetAppData, state, addProject, click, textOf, lastToast, clearToasts,
@@ -30,6 +35,25 @@ function meterText(projectId) {
 
 function diskRuntime() {
   return JSON.parse(m('TTStorage').readRaw()).runtime;
+}
+
+/** 真正地刷新一次（等同用户按 F5），并等它启动完成。 */
+async function hardReloadApp() {
+  const f = document.getElementById('app-frame');
+  const win = f.contentWindow;
+  T.ok(win && win.location, '被测 app 未加载，无法刷新');
+  await new Promise(function (resolve) {
+    let done = false;
+    const finish = function () { if (!done) { done = true; resolve(); } };
+    f.addEventListener('load', finish, { once: true });
+    win.location.reload();
+    setTimeout(finish, 8000);
+  });
+  const ok = await waitFor(function () {
+    return f.contentWindow.__TIMESCRIBE_BOOT__ ? true : null;
+  }, 8000);
+  if (!ok) throw new Error('刷新后 app 没有完成启动');
+  return f.contentWindow;
 }
 
 /** 让被测 app 重新加载，并等它启动完成。 */
@@ -224,8 +248,8 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     T.ok(timer().HEARTBEAT_MS >= 5000, '也不该过于频繁地写盘，实际 ' + timer().HEARTBEAT_MS);
   });
 
-  // ------------------------------------------- 关闭页面 = 结束这一段并保存
-  T.test('关闭页面：这一段直接结束并保存，够阈值才存（用户要的行为）', async function () {
+  // ------------------------------------------- 卸载那一刻：只留现场，不结算
+  T.test('卸载页面时（刷新和关闭都会触发）不急着结算，只留下现场与"告别记号"', async function () {
     await resetAppData();
     setMinSeconds(0);
     const p = addProject('工作');
@@ -235,23 +259,48 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     click(startButton(p.id));
     await sleep(1200);
 
-    // 模拟"1 秒后关闭了浏览器"
-    const closeAt = new Date(Date.now() + 1000).toISOString();
-    const result = timer().finalizeOnClose({ nowIso: closeAt });
+    // 这一步就是真实接线挂在 pagehide / beforeunload 上的处理器
+    const win = document.getElementById('app-frame').contentWindow;
+    win.__TT_HANDLE_CLOSE__();
 
-    T.equal(result.saved, true, '够阈值就应保存');
-    T.equal(result.activeSec, 2, '应结算到关闭那一刻（约 2 秒），实际 ' + result.activeSec);
-    T.equal(state().records.length, 1, '应生成 1 条记录');
-    T.equal(state().records[0].activeSec, 2);
-    T.equal(state().records[0].projectId, p.id);
+    const snap = diskRuntime();
+    T.equal(snap.state, 'running', '卸载时不该把这一段结算掉——现场要留着，等下次打开再定');
+    T.ok(snap.closedAt, '卸载时应留下"正常告别"的记号（用于区分"关掉了/刷新了"与"被强杀"）');
+    T.ok(snap.activeMs >= 1000, '离开那一刻的投入量应写进快照，实际 ' + snap.activeMs + 'ms');
+    T.equal(state().records.length, 0, '卸载那一刻不该生成记录（此刻还分不清是刷新还是关闭）');
+    T.equal(timer().debugState().state, 'running', '内存里也还在计时——页面此刻并没有真的走');
+  });
 
-    T.equal(timer().debugState().state, null, '不该留下任何"暂停中"的段');
-    T.equal(diskRuntime().state, null, '存储里也不该残留进行中的段');
+  T.test('关闭浏览器/关掉应用：下次打开才结算，且只算到离开那一刻（C9）', async function () {
+    await resetAppData();
+    setMinSeconds(0);
+    const p = addProject('工作');
+    m('TTUI').home.render();
 
-    // 关闭之后的时间不能被算进去
+    click(startButton(p.id));
+    await sleep(1200);
+
+    // 用户离开了页面（应用只落盘，不结算）
+    const win0 = document.getElementById('app-frame').contentWindow;
+    win0.__TT_HANDLE_CLOSE__();
+    // 让这个页面在内存里也进入空闲：它真的已经关掉了。
+    // 不这么做的话，等一下测试页去导航时它还会再触发一次 pagehide，
+    // 把"离开那一刻"顺手推后——那是测试的假象，真实关闭只会触发一次。
+    win0.TTTimer.resetForTest();
+
+    // 之后过了 2.5 秒才重新打开——这段时间绝不能算成投入
     await sleep(2500);
-    T.equal(state().records.length, 1);
-    T.equal(state().records[0].activeSec, 2, '关闭之后的时间不该被补算');
+    const win = await reloadApp('');        // 重新打开 = 一次导航，不是刷新
+    const records = win.TTStore.getState().records;
+    T.equal(records.length, 1, '重新打开时应把上一次那一段结算保存下来');
+    const sec = records[0].activeSec;
+    T.ok(sec >= 1 && sec <= 3,
+      '只应算到离开页面那一刻（约 2 秒），不能把关掉后等的 2.5 秒算进去。实际 ' + sec + ' 秒');
+    T.equal(records[0].projectId, p.id);
+    T.equal(win.TTTimer.debugState().state, null, '重新打开时不该有进行中的段');
+    T.equal(win.TTStore.getState().runtime.state, null, '存储里也不该残留进行中的段');
+    T.notContains(win.document.getElementById('toast-host').textContent, '没有正常结束',
+      '用户是自己关掉的，不该说他"没有正常结束"');
   });
 
   T.test('关闭页面时不足阈值：直接丢弃，不留残留', async function () {
@@ -262,59 +311,74 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
 
     click(startButton(p.id));
     await sleep(1200);
-    const result = timer().finalizeOnClose();
+    const win0 = document.getElementById('app-frame').contentWindow;
+    win0.__TT_HANDLE_CLOSE__();
+    win0.TTTimer.resetForTest();       // 页面真的走了
 
-    T.equal(result.saved, false);
-    T.equal(result.discarded, true);
-    T.equal(state().records.length, 0, '不足阈值不该生成记录');
-    T.equal(timer().debugState().state, null);
-    T.equal(diskRuntime().state, null, '也不该留下"暂停中"的段让下次打开继续');
+    const win = await reloadApp('');
+    T.equal(win.TTStore.getState().records.length, 0, '不足阈值不该生成记录');
+    T.equal(win.TTTimer.debugState().state, null);
+    T.equal(diskRuntime().state, null, '也不该留下"进行中"的段让下次打开继续');
   });
 
-  T.test('真实刷新页面：那一段被结算成记录，不再有"暂停中"（C10 的新行为）', async function () {
+  // ------------------------------------------- 刷新 = 接着计时（第六轮）
+  T.test('刷新页面：这一段的计时不结束，刷新后接着走（C10 的新行为）', async function () {
     await resetAppData();
     setMinSeconds(0);
     const p = addProject('工作');
+
+    // 先回到不带 fresh=1 的网址：那是测试页用来清数据的开关，真刷新时会把它一起带回来
+    await reloadApp('');
     m('TTUI').home.render();
 
     click(startButton(p.id));
     await sleep(1200);
     const before = timer().currentSegmentMs();
+    T.ok(before >= 1000, '刷新前应已经走了一点，实际 ' + before + 'ms');
 
-    const win = await reloadApp('');       // 真实刷新（会触发 pagehide）
+    const win = await hardReloadApp();       // 真刷新（等同按 F5）
     const st = win.TTTimer.debugState();
-    T.equal(st.state, null, '刷新后不该留下暂停中的段');
-    T.equal(st.projectId, null);
+    T.equal(st.state, 'running', '刷新后应继续计时，而不是把这一段结束掉');
+    T.equal(st.projectId, p.id, '刷新后仍是同一个项目在计时');
+    T.equal(win.TTStore.getState().records.length, 0, '刷新不该生成任何记录');
+    T.contains(win.document.querySelector('[data-project-card="' + p.id + '"]').textContent, '计时中',
+      '刷新后卡片应仍显示"计时中"');
+    T.ok(win.TTTimer.currentSegmentMs() >= before,
+      '刷新后已投入时间应从刷新前接着涨（' + before + ' → ' + win.TTTimer.currentSegmentMs() + 'ms）');
 
+    // 刷新后继续累计，而且是一段连续的时间
+    await sleep(1200);
+    T.ok(win.TTTimer.currentSegmentMs() >= before + 1000, '刷新后应继续累计');
+    T.equal(win.TTTimer.debugState().state, 'running');
+
+    win.TTTimer.stop();
     const records = win.TTStore.getState().records;
-    T.equal(records.length, 1, '刷新前那一段应被保存下来（数据不丢）');
-    const sec = records[0].activeSec;
-    T.ok(sec >= 1, '时长应至少 1 秒，实际 ' + sec);
-    T.ok(sec <= 5, '只应算到关闭那一刻，不能把刷新后的时间也算进去（' + before + ' → ' + sec + ' 秒）');
-    T.contains(win.document.getElementById('stat-total').textContent, win.TTCalc.fmtDuration(sec));
+    T.equal(records.length, 1, '刷新前后应算作同一段，最终只落一条记录');
+    T.ok(records[0].activeSec >= 2,
+      '刷新前 + 刷新后都应算进这一段，实际 ' + records[0].activeSec + ' 秒');
   });
 
-  T.test('关闭浏览器只结算到关闭那一刻，不凭空多出时间（C9）', async function () {
+  T.test('刷新时处于"暂停中"：刷新后仍是暂停中，这一段也不结束', async function () {
     await resetAppData();
     setMinSeconds(0);
     const p = addProject('工作');
+    await reloadApp('');
     m('TTUI').home.render();
 
     click(startButton(p.id));
-    await sleep(1100);
+    await sleep(1200);
+    click(actionButton(p.id, 'pause'));
+    const invested = timer().currentSegmentMs();
+    T.equal(timer().debugState().state, 'paused');
 
-    // 1 秒后关闭，然后我们故意再等 3 秒才"重新打开"
-    const closeAt = new Date(Date.now() + 1000).toISOString();
-    timer().finalizeOnClose({ nowIso: closeAt });
-    await sleep(3000);
-
-    const win = await reloadApp('');
-    const records = win.TTStore.getState().records;
-    T.equal(records.length, 1);
-    const sec = records[0].activeSec;
-    T.ok(sec >= 1 && sec <= 3,
-      '记录时长应只到"关闭那一刻"（约 2 秒），不能把关闭后等的 3 秒算进去。实际 ' + sec + ' 秒');
-    T.equal(win.TTTimer.debugState().state, null, '重新打开时不该有进行中的段');
+    const win = await hardReloadApp();
+    const st = win.TTTimer.debugState();
+    T.equal(st.state, 'paused', '刷新后应仍是"暂停中"，而不是把这一段结束掉');
+    T.equal(st.projectId, p.id, '刷新后仍是同一个项目的这一段');
+    T.equal(win.TTStore.getState().records.length, 0, '刷新不该生成任何记录');
+    T.ok(Math.abs(win.TTTimer.currentSegmentMs() - invested) < 1000,
+      '已投入时间应原样接回来（' + invested + ' → ' + win.TTTimer.currentSegmentMs() + 'ms）');
+    T.ok(actionButton(p.id, 'resume'), '刷新后界面应处于暂停态，能点"继续"');
   });
 
   T.test('异常退出（被强杀、没走正常关闭）：按最后一次落盘时刻结算并保存（C9 兜底）', async function () {
@@ -325,8 +389,9 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     clearToasts();
 
     // 造一段现场：开始于 30 秒前，最后一次落盘在 10 秒前。
-    // 也就是说这 20 秒是"计时中真实走过并被落盘的时间"，而最后 10 秒是崩溃后流逝的，
-    // 必须只结算前 20 秒，不能补算到"现在"（那会变成 30 秒）。
+    // 快照里记的 activeMs 就是"截至 lastSeenAt 一共投入了 20 秒"，
+    // 而最后 10 秒是崩溃之后流逝的，必须只结算那 20 秒，不能补算到"现在"（那会变成 30 秒）。
+    // 注意这里没有 closedAt：说明上一次不是关掉/刷新，而是被强杀。
     const base = Date.now();
     const resumeAt = new Date(base - 30000).toISOString();
     const seenAt = new Date(base - 10000).toISOString();
@@ -336,7 +401,7 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
       saved: {
         projectId: p.id,
         state: 'running',
-        activeMs: 0,
+        activeMs: 20000,
         pausedMs: 0,
         segmentStartAt: resumeAt,
         lastResumeAt: resumeAt,
@@ -346,6 +411,7 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     });
 
     T.equal(result.recovered, true);
+    T.equal(result.crashed, true, '没有"告别记号"应判为被强杀');
     T.equal(result.saved, true, '够阈值应保存');
     T.equal(result.activeSec, 20, '只应结算到最后落盘时刻（20 秒），而不是补算到"现在"（30 秒）');
     T.ok(result.activeSec < 30, '崩溃后的那 10 秒绝不能被算进去');
@@ -367,7 +433,7 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
 
     const result = timer().reconcileOnLoad({
       saved: {
-        projectId: p.id, state: 'running', activeMs: 0, pausedMs: 0,
+        projectId: p.id, state: 'running', activeMs: 28000, pausedMs: 0,
         segmentStartAt: resumeAt, lastResumeAt: resumeAt, lastPauseAt: null, lastSeenAt: seenAt
       }
     });
@@ -380,7 +446,74 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     T.equal(timer().debugState().state, null);
   });
 
-  T.test('暂停中关闭页面：那一段也直接结束并保存', async function () {
+  T.test('刷新接回来：投入量从离开那一刻接着走，绝不翻倍', async function () {
+    await resetAppData();
+    setMinSeconds(0);
+    const p = addProject('工作');
+    m('TTUI').home.render();
+    clearToasts();
+
+    // 一段真实走过 20 秒的现场，3 秒前被刷掉了（快照里的 activeMs 就是那 20 秒）
+    const base = Date.now();
+    const resumeAt = new Date(base - 23000).toISOString();
+    const seenAt = new Date(base - 3000).toISOString();
+    timer().resetForTest();
+
+    const result = timer().reconcileOnLoad({
+      isReload: true,
+      saved: {
+        projectId: p.id, state: 'running', activeMs: 20000, pausedMs: 0,
+        segmentStartAt: resumeAt, lastResumeAt: resumeAt, lastPauseAt: null,
+        lastSeenAt: seenAt, closedAt: seenAt, segmentId: 'seg-reload-1'
+      }
+    });
+
+    T.equal(result.recovered, true);
+    T.equal(result.restored, true, '刷新应走"接回来"这条路');
+    T.equal(result.saved, false);
+    T.equal(state().records.length, 0, '刷新不该生成记录');
+    T.equal(timer().debugState().state, 'running');
+    T.equal(timer().debugState().projectId, p.id);
+
+    // 离开的那 3 秒算作投入（本来也不该扣），所以是 20 + 3 秒左右；
+    // 如果哪天又写出"锚点加两遍"的毛病，这里会直接变成 40 秒以上。
+    const now = timer().currentSegmentMs();
+    T.ok(now >= 23000 && now < 24000,
+      '刷新后投入量应是 20 秒 + 离开的 3 秒 ≈ 23 秒，不能翻倍也不能丢。实际 ' + now + 'ms');
+    T.equal(diskRuntime().segmentId, 'seg-reload-1', '存储里应还是同一段（不是新开一段）');
+    timer().stop();
+  });
+
+  T.test('现场躺了太久（比如关掉浏览器几小时后由浏览器恢复标签）不当作刷新', async function () {
+    await resetAppData();
+    setMinSeconds(0);
+    const p = addProject('工作');
+    m('TTUI').home.render();
+    clearToasts();
+
+    // 两小时前离开的现场：即便浏览器说"这是 reload"，也绝不能接回来——
+    // 否则这两小时会被当成投入。
+    const base = Date.now();
+    const resumeAt = new Date(base - 2 * 3600 * 1000).toISOString();
+    const seenAt = new Date(base - 2 * 3600 * 1000 + 20000).toISOString();
+    timer().resetForTest();
+
+    const result = timer().reconcileOnLoad({
+      isReload: true,
+      saved: {
+        projectId: p.id, state: 'running', activeMs: 20000, pausedMs: 0,
+        segmentStartAt: resumeAt, lastResumeAt: resumeAt, lastPauseAt: null,
+        lastSeenAt: seenAt, closedAt: seenAt, segmentId: 'seg-stale-1'
+      }
+    });
+
+    T.equal(result.restored, false, '躺了太久的现场不该接回来');
+    T.equal(result.saved, true);
+    T.equal(result.activeSec, 20, '只结算当时真正投入的 20 秒，那两小时不算');
+    T.equal(timer().debugState().state, null, '不该留下进行中的段');
+  });
+
+  T.test('暂停中关闭页面：那一段也结束并保存', async function () {
     await resetAppData();
     setMinSeconds(0);
     const p = addProject('工作');
@@ -392,14 +525,23 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     click(actionButton(p.id, 'pause'));
     await sleep(500);
 
-    const result = timer().finalizeOnClose();
-    const detail = '（返回：' + JSON.stringify(result) + '，暂停前走了 ' + runningFor + 'ms）';
-    T.ok(result.ok, '应真的处理了一段，而不是以为自己空闲' + detail);
-    T.equal(result.saved, true, '暂停中关闭也应把已投入的部分保存下来' + detail);
-    T.ok(result.activeSec >= 1, '已投入应至少 1 秒' + detail);
-    T.ok(result.pausedSec >= 0, '暂停时长不该是负数或缺失' + detail);
-    T.equal(state().records.length, 1, '应生成记录' + detail);
-    T.equal(timer().debugState().state, null, '不该留下进行中的段' + detail);
+    // 卸载那一刻只落盘，不结算
+    const win0 = document.getElementById('app-frame').contentWindow;
+    win0.__TT_HANDLE_CLOSE__();
+    const snap = diskRuntime();
+    const detail = '（快照：' + JSON.stringify(snap) + '，暂停前走了 ' + runningFor + 'ms）';
+    T.equal(snap.state, 'paused', '卸载时存储里应还是"暂停中"（说明没有提前结算）' + detail);
+    T.ok(snap.activeMs >= 1000, '已投入的毫秒数应写进快照' + detail);
+    T.ok(snap.pausedMs >= 400, '暂停时长也应写进快照' + detail);
+    win0.TTTimer.resetForTest();       // 页面真的走了，别让它稍后再补一次 pagehide
+
+    // 重新打开时才结算
+    const win = await reloadApp('');
+    const records = win.TTStore.getState().records;
+    T.equal(records.length, 1, '暂停中关掉也应把已投入的部分保存下来' + detail);
+    T.ok(records[0].activeSec >= 1, '已投入应至少 1 秒' + detail);
+    T.ok(records[0].pausedSec >= 0, '暂停时长不该是负数或缺失' + detail);
+    T.equal(win.TTTimer.debugState().state, null, '不该留下进行中的段' + detail);
   });
 
   T.test('空闲时关闭页面不会产生任何记录或残留', async function () {
@@ -408,11 +550,13 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     m('TTUI').home.render();
     m('TTStore').flush();
 
-    const result = timer().finalizeOnClose();
-    T.equal(result.ok, false);
-    T.equal(result.saved, false);
-    T.equal(state().records.length, 0);
-    T.equal(diskRuntime().state, null, '存储里不该有进行中的段');
+    // 空闲时卸载：没有现场可留，更不该冒出记录
+    document.getElementById('app-frame').contentWindow.__TT_HANDLE_CLOSE__();
+    T.equal(diskRuntime().state, null, '存储里本来就没有进行中的段');
+
+    const win = await reloadApp('');
+    T.equal(win.TTStore.getState().records.length, 0);
+    T.equal(diskRuntime().state, null, '重新打开后也不该有残留');
   });
 
   T.test('同一段被重复结算时只记一条（比如计时中又打开了一个页面）', async function () {
@@ -445,6 +589,8 @@ T.defineSuite('P4', '计时器：四种状态与规则', async function () {
     });
     T.equal(fromSecondWindow.saved, true, '第二个页面应把这段保存下来');
     T.equal(state().records.length, 1);
+    T.equal(state().records[0].activeSec, Math.round(snapshot.activeMs / 1000),
+      '结算出来的时长就是快照里那个总量（快照存的是"截至 lastSeenAt 的总量"，不能再叠一遍锚点导致翻倍）');
 
     // 第一个页面并不知道这件事，它内存里还在继续计时，稍后停止
     timer().debugRestore({

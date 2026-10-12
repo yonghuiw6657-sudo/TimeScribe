@@ -10,6 +10,10 @@
   const util = global.TTUtil;
   const calc = global.TTCalc;
 
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  /** 扇形图的底环颜色：和 css/app.css 里的深色底一致，别用浅色，暗底上会刺眼。 */
+  const TRACK_COLOR = '#2c3866';
+
   let clockTimer = null;
 
   function store() {
@@ -63,12 +67,27 @@
     util.clear(host);
 
     const chart = calc.chartData(state, new Date());
+    host.classList.toggle('is-empty', !chart.slices.length);
+
     if (!chart.slices.length) {
-      host.appendChild(util.el('svg', { width: 132, height: 132, viewBox: '0 0 42 42' }, [
-        util.el('circle', {
-          cx: 21, cy: 21, r: 15.9, fill: 'none', stroke: '#eef2f7', 'stroke-width': 6
-        })
-      ]));
+      // 注意：不能用 document.createElement('svg') —— 那样建出来的是普通未知元素，
+      // 浏览器不会按 SVG 渲染，画出来的圆根本看不见（这里曾经就这么漏了）。
+      const emptySvg = document.createElementNS(SVG_NS, 'svg');
+      emptySvg.setAttribute('width', '132');
+      emptySvg.setAttribute('height', '132');
+      emptySvg.setAttribute('viewBox', '0 0 42 42');
+
+      const emptyRing = document.createElementNS(SVG_NS, 'circle');
+      emptyRing.setAttribute('cx', '21'); emptyRing.setAttribute('cy', '21');
+      emptyRing.setAttribute('r', '15.9');
+      emptyRing.setAttribute('fill', 'none');
+      emptyRing.setAttribute('stroke', TRACK_COLOR);
+      emptyRing.setAttribute('stroke-width', '6');
+      emptyRing.setAttribute('stroke-dasharray', '3.6 2.6');   // 虚线：一眼看出是"还空着"
+      emptyRing.setAttribute('stroke-linecap', 'round');
+      emptySvg.appendChild(emptyRing);
+
+      host.appendChild(emptySvg);
       host.appendChild(util.el('div', {
         class: 'empty-hint', text: '还没有记录，先建一个项目开始计时吧'
       }));
@@ -78,22 +97,21 @@
     const total = chart.totalSec;
     const radius = 15.9;
     const circumference = 2 * Math.PI * radius;
-    const svgNS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(svgNS, 'svg');
+    const svg = document.createElementNS(SVG_NS, 'svg');
     svg.setAttribute('width', '132');
     svg.setAttribute('height', '132');
     svg.setAttribute('viewBox', '0 0 42 42');
 
-    const bg = document.createElementNS(svgNS, 'circle');
+    const bg = document.createElementNS(SVG_NS, 'circle');
     bg.setAttribute('cx', '21'); bg.setAttribute('cy', '21'); bg.setAttribute('r', String(radius));
-    bg.setAttribute('fill', 'none'); bg.setAttribute('stroke', '#eef2f7'); bg.setAttribute('stroke-width', '6');
+    bg.setAttribute('fill', 'none'); bg.setAttribute('stroke', TRACK_COLOR); bg.setAttribute('stroke-width', '6');
     svg.appendChild(bg);
 
     let offset = 0;
     chart.slices.forEach(function (slice) {
       const fraction = slice.seconds / total;
       const length = fraction * circumference;
-      const circle = document.createElementNS(svgNS, 'circle');
+      const circle = document.createElementNS(SVG_NS, 'circle');
       circle.setAttribute('cx', '21');
       circle.setAttribute('cy', '21');
       circle.setAttribute('r', String(radius));
@@ -103,7 +121,7 @@
       circle.setAttribute('stroke-dasharray', length + ' ' + (circumference - length));
       circle.setAttribute('stroke-dashoffset', String(-offset));
       circle.setAttribute('data-slice-id', slice.id);
-      const title = document.createElementNS(svgNS, 'title');
+      const title = document.createElementNS(SVG_NS, 'title');
       title.textContent = slice.name + ' · ' + calc.fmtDuration(slice.seconds) + ' · ' + slice.percent + '%';
       circle.appendChild(title);
       svg.appendChild(circle);
@@ -153,15 +171,47 @@
     });
   }
 
+  /**
+   * 摘要行（"共 X · 今天 Y · …"）。
+   *
+   * 每一段单独包一个不换行的 span：宽度不够时在「·」处换行，
+   * 而不是在「6 小时 45 分」中间断开、把「分」甩到下一行。
+   */
+  function metaLine(parts) {
+    const node = util.el('div', { class: 'm' });
+    parts.forEach(function (text, i) {
+      if (i) node.appendChild(document.createTextNode(' · '));
+      node.appendChild(util.el('span', { class: 'mseg', text: text }));
+    });
+    return node;
+  }
+
   function focusChip(item, label) {
     if (item.focusPercent === null || item.focusPercent === undefined) return null;
     return util.el('span', { class: 'focus-chip', text: (label || '') + '专注 ' + item.focusPercent + '%' });
+  }
+
+  /**
+   * 「＋加时间」：不用开计时，直接给这个项目补一段投入时长。
+   * 和计时按钮一样放在卡片里，由 decorateButtons() 把项目 id 补上去。
+   */
+  function quickAddButton() {
+    return util.el('button', {
+      type: 'button',
+      class: 'btn tiny quick-add',
+      'data-action': 'quick-add',
+      text: '＋加时间',
+      title: '不用计时，直接补一段投入时长'
+    });
   }
 
   function menuButton(project, isChild) {
     return util.el('button', {
       type: 'button',
       class: 'btn ghost tiny',
+      // data-action 是给 main.js 的事件委托看的，缺了它这个按钮就是个死键；
+      // data-menu-for 是给 openMenu 用的（打开谁的菜单）。两个都要有。
+      'data-action': 'menu',
       'data-menu-for': project.id,
       text: '⋯',
       title: '更多操作'
@@ -200,7 +250,7 @@
       }),
       util.el('div', { class: 'pname' }, [
         nameRow,
-        util.el('div', { class: 'm', text: metaParts.join(' · ') }),
+        metaLine(metaParts),
         util.el('div', { class: 'bar' }, [
           util.el('i', { style: { width: progress + '%', background: project.color || '#3b82f6' } })
         ])
@@ -208,7 +258,10 @@
       util.el('div', { class: 'pact' }, [
         meterNode(item),
         actionButton(item),
-        isRunning || isPaused ? util.el('button', { type: 'button', class: 'btn tiny', 'data-action': 'stop', text: '停止' }) : null,
+        // 只有"计时中"才补一个停止按钮；暂停时 actionButton 已经给了「继续 + 停止」，
+        // 这里再补一个就会出现两个「停止」。
+        isRunning ? util.el('button', { type: 'button', class: 'btn tiny', 'data-action': 'stop', text: '停止' }) : null,
+        quickAddButton(),
         menuButton(project, false)
       ])
     ]);
@@ -249,12 +302,16 @@
         isPaused ? util.el('span', { class: 'kick pause', text: '已暂停' }) : null,
         focusChip(item, '')
       ]),
-      util.el('div', { class: 'm', text: '共 ' + calc.fmtDuration(item.totalActiveSec) + ' · 今天 ' + calc.fmtDuration(item.todayActiveSec) })
+      metaLine([
+        '共 ' + calc.fmtDuration(item.totalActiveSec),
+        '今天 ' + calc.fmtDuration(item.todayActiveSec)
+      ])
     ]));
     row.appendChild(util.el('div', { class: 'pact' }, [
       meterNode(item),
       actionButton(item),
-      isRunning || isPaused ? util.el('button', { type: 'button', class: 'btn tiny', 'data-action': 'stop', text: '停止' }) : null,
+      isRunning ? util.el('button', { type: 'button', class: 'btn tiny', 'data-action': 'stop', text: '停止' }) : null,
+      quickAddButton(),
       menuButton(project, true)
     ]));
     return row;
@@ -348,7 +405,9 @@
    * 放在渲染内部（而不是事件绑定处），保证"渲染完成"就等于"按钮可点"。
    */
   function decorateButtons() {
-    const TIMER_ACTIONS = { start: true, pause: true, resume: true, stop: true };
+    // 卡片里所有需要"知道自己属于哪个项目"的按钮。quick-add 不走计时器，
+    // 但同样要靠这个把 data-project-id 补上去。
+    const TIMER_ACTIONS = { start: true, pause: true, resume: true, stop: true, 'quick-add': true };
 
     document.querySelectorAll('[data-project-card]').forEach(function (card) {
       const projectId = card.getAttribute('data-project-card');

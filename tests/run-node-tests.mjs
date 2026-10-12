@@ -90,6 +90,7 @@ const GLOBAL_NAMES = {
   'js/ui/modal.js': null,
   'js/ui/form.js': null,
   'js/ui/home.js': null,
+  'js/ui/checkin.js': null,
   'js/ui/projectActions.js': null,
   'js/ui/records.js': null,
   'js/ui/settings.js': null,

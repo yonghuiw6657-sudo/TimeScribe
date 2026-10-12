@@ -280,3 +280,185 @@ TTTest.defineSuite('P2', '统计汇总与扇形图', function () {
     T.ok(chartElapsed < 500, '扇形图计算应在 500ms 内完成，实际 ' + chartElapsed + 'ms');
   });
 });
+
+/**
+ * 每日打卡的底层逻辑（P12 用到的 dailyTotals / checkinStats）。
+ *
+ * 日期一律由"本地时间的中午"生成：new Date('2025-06-11') 是 UTC 午夜，
+ * 在 UTC 负偏移的时区里会被本地日历挪到前一天，那样测的就不是我们想测的东西了。
+ */
+TTTest.defineSuite('P2', '每日打卡：按天聚合与连续天数', function () {
+  const T = TTTest;
+  const C = TT.TTCalc;
+
+  const NOW = new Date(2025, 5, 11, 12, 0, 0);   // 2025-06-11 本地中午
+  const TODAY = C.todayStr(NOW);                  // '2025-06-11'
+
+  function rec(id, projectId, date, activeSec, extra) {
+    return Object.assign({
+      id: id, projectId: projectId, date: date,
+      startAt: null, endAt: null, activeSec: activeSec, pausedSec: 0,
+      note: '', source: 'timer', createdAt: null
+    }, extra || {});
+  }
+
+  function proj(id, name, parentId) {
+    return { id: id, name: name, parentId: parentId || null, color: '#3b82f6', order: 0, createdAt: null };
+  }
+
+  const PROJECTS = [proj('work', '工作'), proj('clientA', '客户A', 'work'), proj('study', '学习')];
+
+  T.test('按天聚合：子项目并进父项目，当天合计 = 当天全部记录之和', function () {
+    const state = {
+      projects: PROJECTS,
+      records: [
+        rec('r1', 'work', TODAY, 600),
+        rec('r2', 'clientA', TODAY, 1800),          // 子项目
+        rec('r3', 'study', TODAY, 400)
+      ]
+    };
+    const totals = C.dailyTotals(state);
+
+    T.deepEqual(totals.dates, [TODAY], '只有今天有投入');
+    const day = totals.byDate[TODAY];
+    T.equal(day.items.length, 2, '客户A 要并进工作，不该单独占一行');
+    T.equal(day.items[0].id, 'work', '按时长降序，工作在前');
+    T.equal(day.items[0].seconds, 600 + 1800, '父项目的数值含子项目');
+    T.equal(day.items[1].id, 'study');
+    T.equal(day.items[1].seconds, 400);
+    T.equal(day.totalSec, 600 + 1800 + 400, '当天合计就是当天所有记录之和');
+  });
+
+  T.test('0 秒的记录不产生"打卡日"（既不点亮，也点不动）', function () {
+    const totals = C.dailyTotals({
+      projects: PROJECTS,
+      records: [rec('r0', 'work', TODAY, 0)]
+    });
+    T.deepEqual(totals.dates, [], '全是 0 秒的一天不算打卡');
+    const stats = C.checkinStats({ projects: PROJECTS, records: [rec('r0', 'work', TODAY, 0)] }, NOW);
+    T.equal(stats.todayChecked, false);
+    T.equal(stats.streak, 0);
+  });
+
+  T.test('未知项目的记录被忽略，不会污染某一天的合计', function () {
+    const totals = C.dailyTotals({
+      projects: PROJECTS,
+      records: [rec('r1', 'work', TODAY, 600), rec('ghost', '不存在', TODAY, 99999)]
+    });
+    T.equal(totals.byDate[TODAY].totalSec, 600);
+    T.equal(totals.byDate[TODAY].items.length, 1);
+  });
+
+  T.test('同一天多个项目按时长降序；等长时按名字定序，且与记录的先后无关', function () {
+    // 这里要的是三个平级的父项目（子项目会被并进父项目，凑不出并列的三个）
+    const projects = [proj('p1', '工作'), proj('p2', '学习'), proj('p3', '客户A')];
+    const records = [
+      rec('a', 'p1', TODAY, 300),
+      rec('b', 'p2', TODAY, 300),
+      rec('c', 'p3', TODAY, 900)
+    ];
+    const items = C.dailyTotals({ projects: projects, records: records }).byDate[TODAY].items;
+
+    T.equal(items.length, 3);
+    T.equal(items[0].id, 'p3', '900 秒的排最前');
+    // 两条 300 秒的按时长分不出先后，用名字兜底（'学' 的码点小于 '工'，所以 学习 在前）。
+    // 关键不是谁在前，而是**每次都必须一样**——否则日历每重绘一次，条的顺序就会跳。
+    T.equal(items[1].name, '学习');
+    T.equal(items[2].name, '工作');
+
+    const reordered = C.dailyTotals({
+      projects: projects,
+      records: [records[2], records[1], records[0]]      // 同样的三条，换个先后
+    }).byDate[TODAY].items;
+
+    T.deepEqual(
+      reordered.map(function (x) { return x.id; }),
+      ['p3', 'p2', 'p1'],
+      '记录的先后顺序不能影响输出顺序'
+    );
+  });
+
+  T.test('连续打卡：今天打过卡就从今天往前数', function () {
+    const state = {
+      projects: PROJECTS,
+      records: [
+        rec('r1', 'work', TODAY, 100),
+        rec('r2', 'work', C.addDays(TODAY, -1), 100),
+        rec('r3', 'work', C.addDays(TODAY, -2), 100)
+      ]
+    };
+    const stats = C.checkinStats(state, NOW);
+    T.equal(stats.todayChecked, true);
+    T.equal(stats.streak, 3);
+  });
+
+  T.test('连续打卡：今天还没打卡时从昨天往前数（不能报成"中断"）', function () {
+    const state = {
+      projects: PROJECTS,
+      records: [
+        rec('r1', 'work', C.addDays(TODAY, -1), 100),
+        rec('r2', 'work', C.addDays(TODAY, -2), 100)
+      ]
+    };
+    const stats = C.checkinStats(state, NOW);
+    T.equal(stats.todayChecked, false, '今天确实还没打卡');
+    T.equal(stats.streak, 2, '但连续天数不该因此清零');
+  });
+
+  T.test('连续打卡：中间断一天，就只数到断点', function () {
+    const state = {
+      projects: PROJECTS,
+      records: [
+        rec('r1', 'work', TODAY, 100),
+        rec('r2', 'work', C.addDays(TODAY, -1), 100),
+        // 前天断了
+        rec('r3', 'work', C.addDays(TODAY, -3), 100),
+        rec('r4', 'work', C.addDays(TODAY, -4), 100)
+      ]
+    };
+    T.equal(C.checkinStats(state, NOW).streak, 2);
+  });
+
+  T.test('连续天数可以跨月；本月打卡天数只数本月', function () {
+    const now = new Date(2025, 5, 2, 12, 0, 0);          // 2025-06-02
+    const today = C.todayStr(now);
+    const state = {
+      projects: PROJECTS,
+      records: [
+        rec('r1', 'work', today, 100),                    // 06-02
+        rec('r2', 'work', C.addDays(today, -1), 100),     // 06-01
+        rec('r3', 'work', C.addDays(today, -2), 100),     // 05-31
+        rec('r4', 'work', C.addDays(today, -3), 100)      // 05-30
+      ]
+    };
+    const stats = C.checkinStats(state, now);
+    T.equal(stats.streak, 4, '跨月不是中断，连续天数要接着数');
+    T.equal(stats.monthCount, 2, '本月打卡只数 06-02 和 06-01');
+    T.equal(stats.monthKey, '2025-06');
+    T.equal(stats.dates.length, 4);
+  });
+
+  T.test('完全没有记录时：连续 0 天、本月 0 天，且不报错', function () {
+    const empty = C.checkinStats({ projects: [], records: [] }, NOW);
+    T.equal(empty.streak, 0);
+    T.equal(empty.monthCount, 0);
+    T.equal(empty.todayChecked, false);
+    T.deepEqual(empty.dates, []);
+    T.deepEqual(C.dailyTotals({ projects: [], records: [] }).dates, []);
+
+    const noRecord = C.checkinStats({ projects: PROJECTS, records: [] }, NOW);
+    T.equal(noRecord.streak, 0, '有项目但没记录同样是 0');
+    T.equal(noRecord.monthCount, 0);
+  });
+
+  T.test('打卡统计是只读的：算完之后原数据一个字都没变', function () {
+    const state = {
+      projects: PROJECTS,
+      records: [rec('r1', 'work', TODAY, 100), rec('r2', 'clientA', TODAY, 200)]
+    };
+    const before = JSON.stringify(state);
+    C.checkinStats(state, NOW);
+    C.dailyTotals(state);
+    T.equal(JSON.stringify(state), before, '统计过程不能改动传进来的 state');
+  });
+});

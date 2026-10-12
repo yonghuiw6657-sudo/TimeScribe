@@ -229,12 +229,12 @@
 
     closeMenu();
     const wrap = util.el('div', { class: 'menu-wrap', id: 'active-menu' }, [menu]);
+    // 挂在按钮旁边（兄弟节点）而不是按钮里面：菜单宽度不受卡片挤压，也不撑开卡片。
+    // 代价是"点空白关菜单"不能靠 contains 判断，由 main.js 那个全局监听器统一负责
+    // （它会放过菜单自身和「⋯」按钮）。这里**不要**再自己注册一个 document 监听器：
+    // 那样在点另一个项目的「⋯」时，旧监听器会把新打开的菜单一并关掉。
     if (anchor && anchor.parentNode) anchor.parentNode.appendChild(wrap);
     else document.body.appendChild(wrap);
-
-    setTimeout(function () {
-      document.addEventListener('click', closeMenu, { once: true });
-    }, 0);
   }
 
   function closeMenu() {

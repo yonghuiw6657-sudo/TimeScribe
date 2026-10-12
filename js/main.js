@@ -36,7 +36,13 @@
       'pause': function () { window.TTTimer.pause(); },
       'resume': function () { window.TTTimer.resume(); },
       'stop': function () { window.TTTimer.stop(); },
-      'menu': function (node) { window.TTUI.projects.openMenu(node.getAttribute('data-menu-for'), node); }
+      'quick-add': function (node) { window.TTUI.records.openQuickAdd(node.getAttribute('data-project-id')); },
+      'menu': function (node) { window.TTUI.projects.openMenu(node.getAttribute('data-menu-for'), node); },
+      // 打卡表：只有打过卡的日期才带 data-action（没打卡的日子渲染成 span），
+      // 所以"点没打卡的日期没反应"在这一层就成立了。
+      'checkin-day': function (node) { window.TTUI.checkin.openDay(node.getAttribute('data-date')); },
+      'checkin-prev': function () { window.TTUI.checkin.shiftMonth(-1); },
+      'checkin-next': function () { window.TTUI.checkin.shiftMonth(1); }
     } },
     { attr: 'data-detail-action', map: {
       'add-record': function (node) { window.TTUI.records.openRecordForm({ projectId: node.getAttribute('data-project-id') }); }
@@ -133,11 +139,14 @@
       });
     }
 
-    // 点空白处关掉"更多"菜单
+    // 点空白处关掉"更多"菜单。
+    // 菜单是挂在「⋯」按钮**旁边**（兄弟节点）而不是里面，所以不能只用 contains 判断：
+    // 打开菜单的那一次点击会一路冒泡到这里，若不放行按钮自己，菜单刚建好就被关掉了。
     document.addEventListener('click', function (event) {
       const menu = document.getElementById('active-menu');
       if (!menu) return;
       if (menu.contains(event.target)) return;
+      if (event.target.closest && event.target.closest('[data-menu-for]')) return;
       window.TTUI.projects.closeMenu();
     });
   }
@@ -155,9 +164,16 @@
     store.flush();
   }
 
-  /** 关闭页面 / 关闭浏览器 / 关掉应用时调用：这一段直接结束并保存（够阈值才存）。 */
+  /**
+   * 页面即将卸载时调用（**刷新页面和关闭页面都会触发它**）。
+   *
+   * 这里刻意**不做任何结算**：卸载这一刻分不清用户是按了刷新，还是关掉了浏览器/应用。
+   * 所以只做两件事——把现场立刻落一次盘，再留下一个"正常告别"的记号。
+   * 真正的收场留给下次打开页面的那一刻（`TTTimer.reconcileOnLoad`）：
+   * 是刷新就接着计时，是关掉了就把这一段结算保存。判断依据见 `js/timer.js` 开头。
+   */
   function handleClose() {
-    if (window.TTTimer && window.TTTimer.finalizeOnClose) window.TTTimer.finalizeOnClose();
+    if (window.TTTimer && window.TTTimer.heartbeat) window.TTTimer.heartbeat({ closing: true });
     store.flush();
   }
 
@@ -257,10 +273,14 @@
     bindEvents();
     bindLifecycle();
 
+    // 首页的两块内容各画各的：左边是打卡表与统计，右边是项目列表。
+    // 这里的订阅顺序就是重绘顺序，两块互不依赖，先订阅的先画。
     store.subscribe(function () {
+      window.TTUI.checkin.render();
       window.TTUI.home.render();
     });
 
+    window.TTUI.checkin.render();
     window.TTUI.home.render();
 
     const parts = [
@@ -282,7 +302,7 @@
 
   // 供自检使用：验证"非 Edge 打开时给出提示"这条逻辑本身
   window.__TT_WARN_IF_NOT_EDGE__ = warnIfNotEdge;
-  // 供自检使用：验证"切到后台不暂停""关闭页面才结束"这两条生命周期的真实接线
+  // 供自检使用：验证"切到后台不暂停""卸载时不留结算、只留现场"这两条生命周期的真实接线
   window.__TT_HANDLE_HIDDEN__ = handleHidden;
   window.__TT_HANDLE_CLOSE__ = handleClose;
 })();

@@ -6,8 +6,16 @@
  * - 暂停时间不计入投入，单独累积用于算专注度。
  * - 单段实际投入不足阈值（默认 2 分钟）→ 整段丢弃并提示。
  * - **切走浏览器/切到别的应用不算中断**：计时按时间戳累计，在后台照常走。
+ * - **刷新页面不算中断**：刷新后接着计时（第六轮改动，见下面的"刷新"一节）。
  * - **关闭页面/关闭浏览器/关掉应用 = 这一段直接结束**：够阈值就存成记录，不够就丢弃。
  * - 停止后一段时间内可撤销（手动点"停止"才有撤销；关闭页面时页面已经没了，无从撤销）。
+ *
+ * 关于"刷新"（第六轮）：
+ * 页面卸载那一刻（pagehide）**分不清用户是按了刷新还是关掉了浏览器**，
+ * 所以那时候不做任何结算，只把现场留在存储里；等到**下次打开页面**时再判断：
+ * 如果这次打开是刷新（Navigation Timing 的 reload），就把那段接回来继续走；
+ * 否则（重新打开/关掉后再开/被强杀）沿用老规则，按最后一次落盘的时刻结算这一段。
+ * 这样一来，"刷新"和"关闭"各自落在正确的分支上，而不是靠一个分不清的时机去猜。
  */
 (function (global) {
   'use strict';
@@ -18,11 +26,21 @@
    *  作用：万一浏览器被强杀（来不及走正常关闭流程），也能把损失限制在这个间隔内。 */
   const HEARTBEAT_MS = 15000;
 
+  /**
+   * "刷新接回来"只认这个时间窗内的现场。
+   *
+   * 为什么需要它：浏览器"恢复上次打开的标签"时，也算一次 reload，
+   * 于是关掉浏览器几小时后再打开，会被误判成刷新——那样中间那几个小时
+   * 就会被当成投入记进去。刷新本身是一瞬间的事（本机页面通常不到 1 秒），
+   * 现场躺了超过一分钟就肯定不是刷新，按老规则结算掉，保住数据的准确性。
+   */
+  const RESTORE_WINDOW_MS = 60000;
+
   function emptyRuntime() {
     return {
       projectId: null, state: null, activeMs: 0, pausedMs: 0,
       segmentStartAt: null, lastResumeAt: null, lastPauseAt: null, lastSeenAt: null,
-      segmentId: null
+      segmentId: null, closedAt: null
     };
   }
 
@@ -60,23 +78,6 @@
     return rt.pausedMs;
   }
 
-  /** 某个现场在指定时刻的投入/暂停毫秒数（用于"结算到关闭那一刻"）。 */
-  function activeMsAt(saved, iso) {
-    const base = saved.activeMs || 0;
-    if (saved.state === 'running' && saved.lastResumeAt) {
-      return base + Math.max(0, new Date(iso).getTime() - new Date(saved.lastResumeAt).getTime());
-    }
-    return base;
-  }
-
-  function pausedMsAt(saved, iso) {
-    const base = saved.pausedMs || 0;
-    if (saved.state === 'paused' && saved.lastPauseAt) {
-      return base + Math.max(0, new Date(iso).getTime() - new Date(saved.lastPauseAt).getTime());
-    }
-    return base;
-  }
-
   function currentSegmentMs() {
     return activeMsNow();
   }
@@ -98,18 +99,31 @@
     });
   }
 
-  function runtimeSnapshot(atIso) {
-    const at = atIso || nowIso();
+  /**
+   * 写进存储的现场快照。
+   *
+   * 口径（重要）：`activeMs` / `pausedMs` 记的是**截至 lastSeenAt 的总量**，
+   * 不是"内存里那个 base"。因为内存中的 rt 是"base + 锚点时刻"拼出来的，
+   * 存总量才能让快照自己就说清"到那一刻为止一共投入了多少"。
+   * 曾经这里存的是总量、而读取方又照"base + 锚点"加了一遍，导致结算时长翻倍；
+   * 第六轮把两边统一成"存总量、读总量"（见 reconcileOnLoad 与 restore）。
+   *
+   * `closedAt`：页面卸载时写下的"我正常告别过"的记号（默认 null）。
+   * 用途是区分"用户关掉/刷新了页面"与"进程被强杀"——被强杀时，
+   * 存储里最后一次落盘的快照一定没有它。
+   */
+  function runtimeSnapshot() {
     return {
       projectId: rt.state ? rt.projectId : null,
       state: rt.state,
-      activeMs: Math.round(atIso ? activeMsAt(rt, at) : activeMsNow()),
-      pausedMs: Math.round(atIso ? pausedMsAt(rt, at) : pausedMsNow()),
+      activeMs: Math.round(activeMsNow()),
+      pausedMs: Math.round(pausedMsNow()),
       segmentStartAt: rt.segmentStartAt,
       lastResumeAt: rt.lastResumeAt,
       lastPauseAt: rt.lastPauseAt,
-      lastSeenAt: at,
-      segmentId: rt.segmentId
+      lastSeenAt: nowIso(),
+      segmentId: rt.segmentId,
+      closedAt: null
     };
   }
 
@@ -133,10 +147,17 @@
   /**
    * 把当前进度静默写进存储（不重绘）。
    * 切到后台、最小化、以及每 15 秒都会做一次，这样"被强杀"也不会丢掉整段。
+   *
+   * options.closing：页面正在卸载（刷新或关闭页面都会走到这里）时调用。
+   * 除了落一次盘，额外记下 closedAt —— 这是"正常告别"的记号，
+   * 供下次打开区分"关掉/刷新"与"被强杀"。注意这里**不做任何结算**：
+   * 卸载那一刻分不清刷新与关闭，结算要等下次打开时再决定（见 reconcileOnLoad）。
    */
-  function heartbeat() {
+  function heartbeat(options) {
     if (!rt.state) return false;
+    const opts = options || {};
     const snap = runtimeSnapshot();
+    if (opts.closing) snap.closedAt = snap.lastSeenAt;
     store().patch(function (state) {
       state.runtime = snap;
       return state;
@@ -398,72 +419,61 @@
     return { ok: true };
   }
 
-  // ------------------------------------------- 关闭页面：结束这一段并保存
+  // ------------------------------------------- 刷新：接着计时（第六轮）
   /**
-   * 关闭页面 / 关闭浏览器 / 关掉应用时调用：
-   * **这一段直接结束**——够阈值就存成记录，不够就丢弃；不会留下"暂停中"的段。
+   * 这次打开页面，是不是"刷新"出来的。
    *
-   * 之所以要在这里同步做完：页面马上就没机会再执行代码了。
-   * 所以整个过程只用同步的写入，不发提示（页面已经在关了，提示没人看得到）。
-   *
-   * options.nowIso 仅供自检使用（模拟"在某个时刻关闭了浏览器"）。
+   * 为什么问浏览器而不是自己记：页面卸载的那个时机（pagehide）**分不清刷新与关闭**，
+   * 只有新打开的页面自己知道"我是被刷新出来的"，所以判断只能放在这里。
+   * 取不到答案时（老浏览器、特殊环境）一律当作"不是刷新"，
+   * 于是回落到老规则——宁可把这一段当作结束，也不要凭空多算一段时间。
    */
-  function finalizeOnClose(options) {
-    const opts = options || {};
-    if (!rt.state) return { ok: false, reason: 'idle', saved: false };
-
-    const atIso = opts.nowIso || nowIso();
-    const activeMs = opts.nowIso ? activeMsAt(rt, atIso) : activeMsNow();
-    const pausedMs = opts.nowIso ? pausedMsAt(rt, atIso) : pausedMsNow();
-    const activeSec = Math.round(activeMs / 1000);
-    const pausedSec = Math.round(pausedMs / 1000);
-
-    const project = projectById(rt.projectId);
-    const threshold = minSeconds();
-    const shouldSave = !!project && activeSec >= threshold;
-
-    const payload = {
-      projectId: rt.projectId,
-      projectName: project ? project.name : '（已删除的项目）',
-      segmentStartAt: rt.segmentStartAt,
-      endAt: atIso,
-      activeSec: activeSec,
-      pausedSec: pausedSec,
-      segmentId: rt.segmentId
-    };
-
-    let record = null;
-    let savedForReal = false;
-    store().commit(function (state) {
-      if (shouldSave) {
-        record = buildRecord(payload);
-        savedForReal = pushRecord(state, record);
-      }
-      state.runtime = emptyRuntime();
-      return state;
-    });
-    store().flush();          // 页面即将关闭，必须立刻落盘
-    stopHeartbeat();
-    rt = emptyRuntime();
-
-    return {
-      ok: true,
-      saved: shouldSave,
-      discarded: !shouldSave,
-      duplicate: shouldSave && !savedForReal,
-      activeSec: activeSec,
-      pausedSec: pausedSec,
-      record: record,
-      threshold: threshold
-    };
+  function isReloadNavigation() {
+    try {
+      const entries = performance.getEntriesByType ? performance.getEntriesByType('navigation') : null;
+      if (entries && entries.length && entries[0].type) return entries[0].type === 'reload';
+      if (performance.navigation) return performance.navigation.type === 1;   // 老接口：1 = 刷新
+    } catch (e) { /* 取不到就按"不是刷新"处理 */ }
+    return false;
   }
 
   /**
-   * 启动时的兜底：上次是"运行中/暂停中"却没有正常结束（浏览器被强杀、进程被杀），
-   * 存储里还留着一段现场。处理方式与正常关闭一致：**结束这一段**，
-   * 但只按"最后一次落盘的时刻"结算——绝不用当前时间补算（否则会凭空多出关机那几小时）。
+   * 把存储里的现场接回内存，继续计时（刷新后走这条路）。
    *
-   * options.saved 仅供自检使用：直接指定"存储里的那段现场"，便于精确验证。
+   * 关键一步是**重新落锚**：锚点从"上一次继续/暂停的时刻"挪到"页面离开的时刻"（lastSeenAt），
+   * 已投入的总量原样接过来。这样刷新用掉的那零点几秒算作投入（本来也不该扣），
+   * 又不会因为锚点还留在很久以前而把同一段时间算两遍。
+   */
+  function restore(saved) {
+    const anchor = saved.lastSeenAt || nowIso();
+    rt = {
+      projectId: saved.projectId,
+      state: saved.state,
+      activeMs: Math.max(0, Math.round(saved.activeMs || 0)),
+      pausedMs: Math.max(0, Math.round(saved.pausedMs || 0)),
+      segmentStartAt: saved.segmentStartAt || anchor,
+      lastResumeAt: saved.state === 'running' ? anchor : null,
+      lastPauseAt: saved.state === 'paused' ? anchor : null,
+      lastSeenAt: nowIso(),
+      segmentId: saved.segmentId || calc.makeId('seg')
+    };
+    heartbeat();          // 顺手把"已经接回来了"写回存储，之后照常心跳
+    startHeartbeat();
+  }
+
+  /**
+   * 启动时的收口：存储里如果还留着一段"进行中/暂停中"的现场，由这里决定它怎么收场。
+   *
+   * - **这次打开是刷新**（用户按 F5），而且现场是刚刚（一分钟内）留下的
+   *   → 把那段接回来继续计时，不生成记录、不提示。
+   * - **其它情况**（重新打开、关掉浏览器后再开、被强杀）→ 这一段结束：
+   *   按"最后一次落盘的时刻"结算，够阈值就存成记录，不够就丢弃。
+   *   绝不用当前时间补算，否则关掉浏览器几小时后再打开，会凭空多出那几个小时。
+   *
+   * 判断为什么放在这里、而不是放在卸载那一刻：见文件开头"关于刷新"那段。
+   *
+   * options.saved / options.isReload 仅供自检使用：
+   * 直接指定"存储里的那段现场"和"这次是不是刷新"，让两个分支都能被精确验证。
    */
   function reconcileOnLoad(options) {
     const opts = options || {};
@@ -476,16 +486,35 @@
       return { recovered: false, saved: false };
     }
 
-    // 结算到"最后一次落盘时刻"
-    const settleIso = saved.lastSeenAt || saved.lastResumeAt || saved.lastPauseAt || nowIso();
-    const activeMs = activeMsAt(saved, settleIso);
-    const pausedMs = pausedMsAt(saved, settleIso);
-    const activeSec = Math.round(activeMs / 1000);
-    const pausedSec = Math.round(pausedMs / 1000);
-
     const project = state.projects.filter(function (p) { return p.id === saved.projectId; })[0];
+    const reload = opts.isReload !== undefined ? !!opts.isReload : (!opts.saved && isReloadNavigation());
+    // 现场躺了太久就不当作刷新（见 RESTORE_WINDOW_MS）
+    const awayMs = Date.now() - new Date(saved.lastSeenAt || 0).getTime();
+    const fresh = isFinite(awayMs) && awayMs <= RESTORE_WINDOW_MS;
+
+    // ---- 刷新：把这段接回来继续走，不生成记录、不提示
+    if (reload && fresh && project) {
+      restore(saved);
+      return {
+        recovered: true,
+        restored: true,
+        saved: false,
+        projectId: saved.projectId,
+        state: saved.state,
+        activeSec: Math.round((saved.activeMs || 0) / 1000),
+        pausedSec: Math.round((saved.pausedMs || 0) / 1000)
+      };
+    }
+
+    // ---- 其它情况：这一段结束，结算到"最后一次落盘时刻"。
+    // 快照里的 activeMs/pausedMs 本来就是截至 lastSeenAt 的总量，直接用，不再叠加。
+    const settleIso = saved.lastSeenAt || saved.lastResumeAt || saved.lastPauseAt || nowIso();
+    const activeSec = Math.round((saved.activeMs || 0) / 1000);
+    const pausedSec = Math.round((saved.pausedMs || 0) / 1000);
     const threshold = minSeconds();
     const shouldSave = !!project && activeSec >= threshold;
+    // 最后一次落盘没有"告别记号" → 上一次不是关掉/刷新，而是被强杀
+    const crashed = !saved.closedAt;
 
     let record = null;
     let savedForReal = false;
@@ -512,14 +541,20 @@
     const projectName = project ? project.name : '（已删除的项目）';
     if (toast) {
       if (shouldSave) {
+        // 关掉/刷新是用户自己的动作，不必吓唬他；被强杀才需要提醒核对
         toast.show({
-          text: '上次「' + projectName + '」的计时没有正常结束，已按最后记录的时刻保存',
-          detail: '投入 ' + calc.fmtDuration(activeSec) + '　请确认这段时间是否准确'
+          text: crashed
+            ? '上次「' + projectName + '」的计时没有正常结束，已按最后记录的时刻保存'
+            : '已记录「' + projectName + '」——离开页面时结束的那一段',
+          detail: crashed
+            ? '投入 ' + calc.fmtDuration(activeSec) + '　请确认这段时间是否准确'
+            : '投入 ' + calc.fmtDuration(activeSec)
         });
       } else if (activeSec > 0) {
         toast.show({
-          text: '上次「' + projectName + '」的计时没有正常结束，那段不到 ' +
-            describeThreshold(threshold) + '，没有计入',
+          text: (crashed ? '上次「' + projectName + '」的计时没有正常结束，'
+                         : '「' + projectName + '」离开页面时结束，') +
+            '那段不到 ' + describeThreshold(threshold) + '，没有计入',
           detail: '实际投入 ' + calc.fmtDuration(activeSec),
           tone: 'warn'
         });
@@ -528,6 +563,8 @@
 
     return {
       recovered: true,
+      restored: false,
+      crashed: crashed,
       saved: shouldSave,
       discarded: !shouldSave,
       duplicate: shouldSave && !savedForReal,
@@ -595,7 +632,6 @@
     activeMsNow: activeMsNow,
     pausedMsNow: pausedMsNow,
     heartbeat: heartbeat,
-    finalizeOnClose: finalizeOnClose,
     reconcileOnLoad: reconcileOnLoad,
     debugState: debugState,
     debugRestore: debugRestore,

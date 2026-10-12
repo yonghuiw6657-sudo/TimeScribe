@@ -3,10 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#05070f">
+<meta name="color-scheme" content="dark">
 <title>TimeScribe</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
+  <!-- 夜空背景：纯 CSS 绘制，不引用任何外部图片，离线也能看 -->
+  <div class="sky" aria-hidden="true">
+    <span class="sky-glow"></span>
+    <span class="sky-band"></span>
+    <span class="sky-moon"></span>
+    <span class="sky-stars is-far"></span>
+    <span class="sky-stars is-mid"></span>
+    <span class="sky-stars is-near"></span>
+    <span class="sky-shoot"></span>
+  </div>
   <div id="app" data-app="timescribe">
     <header class="appbar">
       <div class="logo"><i class="dot-logo"></i>TimeScribe</div>
@@ -26,6 +38,9 @@
         <div class="panel" id="chart-panel">
           <h3>投入分布</h3>
           <div class="chart-wrap" id="chart-host"></div>
+        </div>
+        <div class="panel" id="checkin-panel">
+          <h3>每日打卡</h3>
         </div>
       </section>
       <section class="col-right">
@@ -52,6 +67,7 @@
   <script src="js/ui/modal.js"></script>
   <script src="js/ui/form.js"></script>
   <script src="js/ui/home.js"></script>
+  <script src="js/ui/checkin.js"></script>
   <script src="js/ui/projectActions.js"></script>
   <script src="js/ui/records.js"></script>
   <script src="js/ui/settings.js"></script>

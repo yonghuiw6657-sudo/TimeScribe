@@ -241,6 +241,60 @@ T.defineSuite('P3', '项目界面：卡片与操作', async function () {
     T.equal(state().records.length, 1);
   });
 
+  T.test('点卡片上的「⋯」能打开菜单，菜单里有"删除"；点空白处能关掉（回归）', async function () {
+    await resetAppData();
+    const p = addProject('工作');
+    m('TTUI').home.render();
+
+    m('TTUI').projects.closeMenu();
+    T.ok(!q('#active-menu'), '一开始不该有菜单');
+
+    // 曾经这里是个死键：按钮只带了 data-menu-for、没带 data-action，
+    // 事件委托找不到它，点上去什么都不会发生（整个「⋯」菜单形同虚设）。
+    click(q('[data-project-card="' + p.id + '"] [data-menu-for]'));
+    const menu = q('#active-menu');
+    T.ok(menu, '点「⋯」后应出现菜单');
+    const items = qa('#active-menu .menu-item').map(function (b) { return b.textContent; });
+    T.ok(items.indexOf('编辑') !== -1, '菜单里应有"编辑"');
+    T.ok(items.indexOf('查看时间明细') !== -1, '菜单里应有"查看时间明细"');
+    T.ok(items.indexOf('删除') !== -1, '菜单里应有"删除"');
+
+    // 菜单挂在按钮旁边（兄弟节点）而不是里面，所以"点空白关菜单"不能用 contains 判断；
+    // 若处理不当，打开菜单的那一次点击就会把菜单立刻关掉。
+    await sleep(30);
+    T.ok(q('#active-menu'), '打开菜单的那一次点击不该顺手把菜单关掉');
+
+    click(doc().body);
+    await sleep(30);
+    T.ok(!q('#active-menu'), '点空白处应关掉菜单');
+  });
+
+  T.test('走真实点击路径删除项目：⋯ → 删除 → 确认（B7 的端到端）', async function () {
+    await resetAppData();
+    const parent = addProject('工作');
+    const child = addProject('客户A', parent.id);
+    const other = addProject('学习');
+    const today = m('TTCalc').todayStr();
+    addRecord(parent.id, today, 600);
+    addRecord(child.id, today, 1200);
+    m('TTUI').home.render();
+
+    click(q('[data-project-card="' + parent.id + '"] [data-menu-for]'));
+    const deleteItem = qa('#active-menu .menu-item').filter(function (b) { return b.textContent === '删除'; })[0];
+    T.ok(deleteItem, '菜单里应有删除项');
+    click(deleteItem);
+    T.ok(!q('#active-menu'), '点完菜单项后菜单应关掉');
+    T.contains(modalTitle(), '删除项目', '应弹出删除确认框');
+
+    click(qa('#modal-host .modal .mf .btn').filter(function (b) { return b.textContent === '确认删除'; })[0]);
+    T.equal(state().projects.length, 1, '只剩"学习"');
+    T.equal(state().projects[0].id, other.id);
+    T.equal(state().records.length, 0, '父项目与子项目的记录都要删掉');
+    m('TTUI').home.render();
+    T.notContains(textOf('#project-list'), '客户A');
+    T.notContains(textOf('#project-list'), '工作');
+  });
+
   T.test('计时中的项目：菜单里的"删除"不可用并说明原因（B8）', async function () {
     await resetAppData();
     const p = addProject('工作');
@@ -250,7 +304,10 @@ T.defineSuite('P3', '项目界面：卡片与操作', async function () {
     T.equal(m('TTTimer').debugState().state, 'running', '应已开始计时');
 
     m('TTUI').home.render();
-    m('TTUI').projects.openMenu(p.id, q('[data-project-card="' + p.id + '"] [data-menu-for]'));
+    // 走真实点击路径（不要直接调 openMenu）：曾经「⋯」按钮漏了 data-action，
+    // 直接调用能过、真实点击却点不开，菜单里的删除也就永远够不着。
+    m('TTUI').projects.closeMenu();
+    click(q('[data-project-card="' + p.id + '"] [data-menu-for]'));
     const deleteItem = qa('#active-menu .menu-item').filter(function (b) { return b.textContent === '删除'; })[0];
     T.ok(deleteItem, '菜单里应有删除项');
     T.contains(deleteItem.className, 'disabled');

@@ -10,6 +10,7 @@
     "js/ui/modal.js",
     "js/ui/form.js",
     "js/ui/home.js",
+    "js/ui/checkin.js",
     "js/ui/projectActions.js",
     "js/ui/records.js",
     "js/ui/settings.js",
@@ -83,6 +84,16 @@
     "P10": {
       "browser": [
         "p10-ui.browser.test.js"
+      ]
+    },
+    "P11": {
+      "browser": [
+        "p11-quick-add.browser.test.js"
+      ]
+    },
+    "P12": {
+      "browser": [
+        "p12-checkin.browser.test.js"
       ]
     }
   }

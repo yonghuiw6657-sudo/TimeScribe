@@ -37,7 +37,8 @@
     segmentStartAt: null,
     lastResumeAt: null,
     lastPauseAt: null,
-    lastSeenAt: null
+    lastSeenAt: null,
+    closedAt: null          // 页面卸载时留下的"正常告别"记号（见 js/timer.js）
   };
 
   // ------------------------------------------------------------ storage 后端
@@ -133,6 +134,7 @@
     const r = Object.assign({}, EMPTY_RUNTIME, raw || {});
     r.activeMs = Math.max(0, toInt(r.activeMs, 0));
     r.pausedMs = Math.max(0, toInt(r.pausedMs, 0));
+    r.closedAt = typeof r.closedAt === 'string' ? r.closedAt : null;
     if (['running', 'paused'].indexOf(r.state) === -1) {
       return Object.assign({}, EMPTY_RUNTIME);
     }

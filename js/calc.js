@@ -1,5 +1,5 @@
 /**
- * 纯计算层：时长格式化、日期与周边界、专注度、统计汇总、扇形图分组。
+ * 纯计算层：时长格式化、日期与周边界、专注度、统计汇总、扇形图分组、按天聚合（打卡）。
  *
  * 这里是全 app **唯一**的统计口径来源：
  *   一个项目的累计投入 = 该项目自身记录之和 + 其全部子项目记录之和
@@ -321,6 +321,96 @@
     };
   }
 
+  /**
+   * 按天聚合：每一天用了哪些项目、各投入多少。
+   *
+   * 这是「每日打卡」与「当天矩形图」的唯一口径来源，规则与 summarize 完全一致：
+   * - 一行 = 一个父项目，数值 = 它自身的记录 + 全部子项目记录（最多两层，直接找根）
+   * - 只列当天真的有时长的项目；手动补录同样计入（它本来就进累计口径）
+   * - 挂在未知项目上的记录跳过（正常流程不会出现）
+   *
+   * 返回 { dates, byDate }
+   *   dates  : 有投入的日期，升序（YYYY-MM-DD 的字符串序就是时间序，不用再转日期）
+   *   byDate : { 'YYYY-MM-DD': { totalSec, items: [{ id, name, color, seconds }] } }
+   *            items 按时长降序；等长时按名字、再按 id 兜底，保证每次渲染的顺序都一样
+   */
+  function dailyTotals(state) {
+    const projects = (state && state.projects) || [];
+    const records = (state && state.records) || [];
+
+    const byId = {};
+    projects.forEach(function (p) { byId[p.id] = p; });
+
+    // 先把每条记录归到它的"根项目"上：子项目的记录算在父项目名下
+    const perDate = {};
+    for (const r of records) {
+      const project = byId[r.projectId];
+      if (!project) continue;
+      const root = (project.parentId && byId[project.parentId]) ? byId[project.parentId] : project;
+      const day = perDate[r.date] || (perDate[r.date] = {});
+      day[root.id] = (day[root.id] || 0) + r.activeSec;
+    }
+
+    const byDate = {};
+    Object.keys(perDate).forEach(function (date) {
+      const items = [];
+      Object.keys(perDate[date]).forEach(function (rootId) {
+        const seconds = perDate[date][rootId];
+        if (seconds <= 0) return;            // 0 秒的记录不算这一天的投入
+        const project = byId[rootId];
+        items.push({ id: rootId, name: project.name, color: project.color, seconds: seconds });
+      });
+      if (!items.length) return;             // 一天里全是 0 秒 → 这一天不算打卡
+      items.sort(function (a, b) {
+        if (b.seconds !== a.seconds) return b.seconds - a.seconds;
+        if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+        return a.id < b.id ? -1 : 1;
+      });
+      byDate[date] = {
+        totalSec: items.reduce(function (sum, it) { return sum + it.seconds; }, 0),
+        items: items
+      };
+    });
+
+    return { dates: Object.keys(byDate).sort(), byDate: byDate };
+  }
+
+  /**
+   * 打卡统计：界面上的「连续打卡 N 天 / 本月打卡 N 天」。
+   *
+   * 打卡的定义 = 这一天有投入（也就是 dailyTotals 里存在这一天）。
+   *
+   * 连续天数：今天打过卡就从今天往前数；**今天还没打卡就从昨天往前数**——
+   * 否则每天早上打开应用都会看到「连续 0 天」，把"今天还没开始用"误报成中断。
+   */
+  function checkinStats(state, now) {
+    const today = todayStr(now);
+    const totals = dailyTotals(state);
+    const monthKey = today.slice(0, 7);
+
+    let monthCount = 0;
+    for (const d of totals.dates) {
+      if (d.slice(0, 7) === monthKey) monthCount += 1;
+    }
+
+    let streak = 0;
+    let cursor = totals.byDate[today] ? today : addDays(today, -1);
+    while (cursor && totals.byDate[cursor]) {
+      streak += 1;
+      cursor = addDays(cursor, -1);
+    }
+
+    return {
+      today: today,
+      todayChecked: !!totals.byDate[today],
+      monthKey: monthKey,
+      monthCount: monthCount,
+      streak: streak,
+      dates: totals.dates,
+      byDate: totals.byDate
+    };
+  }
+
   let idCounter = 0;
   function makeId(prefix) {
     idCounter += 1;
@@ -346,6 +436,8 @@
     childrenOf: childrenOf,
     summarize: summarize,
     chartData: chartData,
+    dailyTotals: dailyTotals,
+    checkinStats: checkinStats,
     makeId: makeId
   };
 })(typeof window !== 'undefined' ? window : globalThis);
